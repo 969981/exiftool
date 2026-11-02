@@ -1031,6 +1031,7 @@ $VERSION = '5.08';
     0x80000516 => 'EOS R50 V', #42
     0x80000518 => 'EOS R6 Mark III', #42
     0x80000520 => 'EOS D2000C', #IB
+    0x80000543 => 'EOS R8 Mark II',
     0x80000560 => 'EOS D6000C', #PH (guess)
 );
 
@@ -1498,7 +1499,7 @@ my %offOn = ( 0 => 'Off', 1 => 'On' );
         },
         {
             Name => 'CanonCameraInfoR6m3',
-            Condition => '$$self{Model} =~ /\bEOS R6 (Mark III|V)$/',
+            Condition => '$$self{Model} =~ /\bEOS R(6 Mark III|6 V|8 Mark II)$/',
             SubDirectory => { TagTable => 'Image::ExifTool::Canon::CameraInfoR6m3' },
         },
         {
@@ -1891,6 +1892,7 @@ my %offOn = ( 0 => 'Off', 1 => 'On' );
     0x95 => { #PH (observed in 5D sample image)
         Name => 'LensModel', # (LensName)
         Writable => 'string',
+        RawConv => '$$self{LensModel} = $val', # (used by LensInfo)
     },
     0x96 => [ #PH (CMOSNumber)
         {
@@ -2097,8 +2099,9 @@ my %offOn = ( 0 => 'Off', 1 => 'On' );
             Name => 'ColorData11',
             SubDirectory => { TagTable => 'Image::ExifTool::Canon::ColorData11' },
         },
-        {   # (int16u[4528]) - R1/R5mkII (4528) ref forum16406, R50V (3778) ref PH
-            Condition => '$count == 4528 or $count == 3778',
+        {   # (int16u[4528]) - R1/R5mkII (4528) ref forum16406, R50V and R6mkIII (3778) ref PH,
+            # R8mkII (3447)
+            Condition => '$count == 4528 or $count == 3778 or $count == 3447',
             Name => 'ColorData12',
             SubDirectory => { TagTable => 'Image::ExifTool::Canon::ColorData12' },
         },
@@ -5162,7 +5165,7 @@ my %ciMaxFocal = (
     FIRST_ENTRY => 0,
     PRIORITY => 0,
     GROUPS => { 0 => 'MakerNotes', 2 => 'Camera' },
-    NOTES => 'CameraInfo tags for the EOS R6 Mark III and R6 V.',
+    NOTES => 'CameraInfo tags for the EOS R6 Mark III, R6 V and R8 Mark II.',
     0x084b => { #github488
         Name => 'PowerOnTime',
         Groups => { 2 => 'Time' },
@@ -9350,10 +9353,10 @@ my %ciMaxFocal = (
     },
 );
 
-# Color data (MakerNotes tag 0x4001, count=4528/3778, ref PH)
+# Color data (MakerNotes tag 0x4001, count=4528/3778/3447, ref PH)
 %Image::ExifTool::Canon::ColorData12 = (
     %binaryDataAttrs,
-    NOTES => 'These tags are used by the EOS R1, R5mkII and R50V',
+    NOTES => 'These tags are used by the EOS R1, R5mkII, R50V, R6mkIII and R8mkII',
     FORMAT => 'int16s',
     FIRST_ENTRY => 0,
     GROUPS => { 0 => 'MakerNotes', 2 => 'Camera' },
@@ -9366,6 +9369,8 @@ my %ciMaxFocal = (
         PrintConv => {
             64 => '64 (R1/R5mkII)',
             65 => '65 (R50V)',
+            66 => '66 (R6mkIII)',
+            67 => '67 (R8mkII)',
         },
     },
     0x69 => { Name => 'WB_RGGBLevelsAsShot',    Format => 'int16s[4]' }, # (NC)
@@ -9673,23 +9678,33 @@ my %ciMaxFocal = (
     },
 );
 
-# RFLensType values of the lenses that use the second LensInfo layout (github488)
-my $lensInfoLayout2 = '318|323|324|329|330|331';
-
 # LensInfo counters are only valid when the lens serial number is present.
 # Without it the camera writes zeros or unrelated values (EOS 550D with
-# firmware 1.0.6, 60D with firmware 2.8.1)
-my $lensSerial = '$$self{LensInfoSerial}';
-my $lensLayout1 = "(\$\$self{RFLensType} || 0) !~ /^($lensInfoLayout2)\$/";
-my $lensLayout2 = "(\$\$self{RFLensType} || 0) =~ /^($lensInfoLayout2)\$/";
+# firmware 1.0.6, 60D with firmware 2.8.1).  RF lenses are the exception:
+# some write no serial number but valid counters (eg. on the EOS R8 Mark II)
+my $lensSerial = '($$self{LensInfoSerial} or $$self{RFLensType})';
 
-# the AF and IS counters of the EOS R6 Mark III and C50 don't follow the R5m2
-# layout (eg. 00 80 80 in the IS counter of the RF 28-70mm F2L, which has no IS)
-my $lensAFIS = '$$self{Model} !~ /\b(R6 Mark III|C50)$/';
+# newer lenses use a second layout (github488), recognized by the data: offsets
+# 7-8 are zero and offset 12 or 15 holds a count.  With the first layout the low
+# bytes of the diaphragm count at offset 6 are never zero once the IS or a later
+# counter is filled, since each lens start-up adds diaphragm counts
+my $lensLayout1 = 'not $$self{LensInfoLayout2}';
+my $lensLayout2 = '$$self{LensInfoLayout2}';
+
+# some lenses without IS fill the LensISCount position anyway (eg. 00 80 80, a
+# constant 00 01 00, or a rising count with the second layout), so this counter
+# is only extracted when the lens model name from MakerNotes tag 0x0095 says IS
+# (Canon puts IS in the name of every lens with image stabilization), or when
+# there is no lens model name
+my $lensNoIS = '(not defined $$self{LensModel} or $$self{LensModel} =~ /\bIS\b/)';
 
 # LensInfo counters with the high bit set (0x800000) are not supported by the lens
 # (seen in the AF counter of the TS-E 24mm f/3.5L II) (github488)
 my $lensCountPrint = '$val & 0x800000 ? "Not supported" : $val';
+
+# a counter that is 0 is not reported by the lens, and ff ff ff is filler (eg. in
+# the AF counter of some lenses without IS, which write 00 00 00 in other frames)
+my $lensCountRaw = '$val eq "\0\0\0" || $val eq "\xff\xff\xff" ? undef : $val';
 
 # Lens information (MakerNotes tag 0x4019) (ref 20)
 %Image::ExifTool::Canon::LensInfo = (
@@ -9706,7 +9721,11 @@ my $lensCountPrint = '$val & 0x800000 ? "Not supported" : $val';
         Format => 'undef[5]',
         Priority => 0,
         RawConv => '$val=~/^\0\0\0\0/ ? undef : $val', # (rules out 550D and older lenses)
-        Hook => '$$self{LensInfoSerial} = substr($$dataPt,$pos,4) ne "\0" x 4',
+        Hook => q{
+            $$self{LensInfoSerial} = substr($$dataPt,$pos,4) ne "\0" x 4;
+            $$self{LensInfoLayout2} = length($$dataPt) >= $pos + 18 &&
+                substr($$dataPt,$pos+7,2) eq "\0\0" && substr($$dataPt,$pos+12,6) ne "\0" x 6;
+        },
         ValueConv => 'unpack("H*", $val)',
         ValueConvInv => 'length($val) < 10 and $val = 0 x (10-length($val)) . $val; pack("H*",$val)',
     },
@@ -9723,59 +9742,59 @@ my $lensCountPrint = '$val & 0x800000 ? "Not supported" : $val';
     # same EF lens continued the same counts.  The EOS M5 and M100 don't write
     # this tag, and the EOS M50 and M6 Mark II write zeros, with EF-M and adapted EF-S
     # lenses.  The original EOS R writes zeros with firmware 1.0.0 and fills the
-    # counters with 1.2.0 (1.1.0 was not tested).  The newer lenses in
-    # $lensInfoLayout2 (RFLensType, set by FileInfo before this directory is read)
-    # use a different layout: offsets 6-11 are not counters, and LensDriveCount3 at
+    # counters with 1.2.0 (1.1.0 was not tested).  Some newer lenses use a second
+    # layout ($lensLayout2): offsets 6-11 are not counters, and LensDriveCount3 at
     # offset 15 is filled only by these lenses.  Their LensISCount at offset 12 is
-    # valid.  Lenses that don't report a counter (eg. RF 50mm F1.8 STM, RF 16mm F2.8
-    # STM, older EF lenses) leave it 0, and a counter that is 0 is not extracted,
-    # since any lens that reports one has added counts at its first start-up
+    # valid for the lenses with IS.  Lenses that don't report a counter (eg. RF
+    # 50mm F1.8 STM, RF 16mm F2.8 STM, older EF lenses) leave it 0, and a counter
+    # that is 0 is not extracted, since any lens that reports one has added counts
+    # at its first start-up
     6 => {
         Name => 'LensDiaphragmCount',
         Condition => "$lensSerial and $lensLayout1",
         Notes => q{
-            Not valid for the newer lenses listed under LensDriveCount3.  Counts
-            diaphragm drive commands:  each exposure stopped down from the maximum
-            aperture adds 2 (close and reopen), while exposures at the maximum aperture
-            add none, and so do the frames of a focus-bracketing run, during which the
-            diaphragm stays closed.  Each lens start-up opens the diaphragm fully and
-            returns it to the set aperture, adding a varying number of counts.  Long
-            focus moves add a few counts too
+            Not valid for the lenses with the second layout (see LensDriveCount3).
+            Counts diaphragm drive commands:  each exposure stopped down from the
+            maximum aperture adds 2 (close and reopen), while exposures at the maximum
+            aperture add none, and so do the frames of a focus-bracketing run, during
+            which the diaphragm stays closed.  Each lens start-up opens the diaphragm
+            fully and returns it to the set aperture, adding a varying number of counts.
+            Long focus moves add a few counts too
         },
         Format => 'undef[3]',
-        RawConv => '$val eq "\0\0\0" ? undef : $val',
+        RawConv => $lensCountRaw,
         ValueConv => 'unpack("N","\0$val")',
         PrintConv => $lensCountPrint,
     },
     9 => {
         Name => 'LensAFCount',
-        Condition => "$lensSerial and $lensAFIS and $lensLayout1",
+        Condition => "$lensSerial and $lensLayout1",
         Notes => q{
-            Not valid for the newer lenses listed under LensDriveCount3.  Counts focus
-            drive commands, not the distance moved:  each focus-bracketing step adds 1
-            at any step size or aperture, an AF operation or a manual focus move by wire
-            adds about 2, each lens start-up adds about 3, and stopped-down exposures
-            add none.  Manual-focus lenses (eg. TS-E 24mm f/3.5L II) set the high bit
-            (0x800000), shown as "Not supported".  Not decoded for the EOS R6 Mark III
-            and C50
+            Not valid for the lenses with the second layout (see LensDriveCount3).
+            Counts focus drive commands, not the distance moved:  each focus-bracketing
+            step adds 1 at any step size or aperture, an AF operation or a manual focus
+            move by wire adds about 2, each lens start-up adds about 3, and stopped-down
+            exposures add none.  Manual-focus lenses (eg. TS-E 24mm f/3.5L II) set the
+            high bit (0x800000), shown as "Not supported"
         },
         Format => 'undef[3]',
-        RawConv => '$val eq "\0\0\0" ? undef : $val',
+        RawConv => $lensCountRaw,
         ValueConv => 'unpack("N","\0$val")',
         PrintConv => $lensCountPrint,
     },
     12 => {
         Name => 'LensISCount',
-        Condition => "$lensSerial and $lensAFIS",
+        Condition => "$lensSerial and $lensNoIS",
         Notes => q{
             Appears to count IS unit start-ups:  each lens power-on adds 1, even with
             the IS switch off, each flip of the IS switch adds 1 or 2, and shooting,
-            focus bracketing included, adds none.  Not extracted for lenses without
-            IS, nor for some lenses with IS (eg. RF 600mm F11 and RF 800mm F11).  Not
-            decoded for the EOS R6 Mark III and C50
+            focus bracketing included, adds none.  Only extracted when the LensModel
+            name contains IS, since some lenses without IS fill this position with
+            other values.  Not written by some lenses with IS (eg. RF 600mm F11 and
+            RF 800mm F11)
         },
         Format => 'undef[3]',
-        RawConv => '$val eq "\0\0\0" ? undef : $val',
+        RawConv => $lensCountRaw,
         ValueConv => 'unpack("N","\0$val")',
         PrintConv => $lensCountPrint,
     },
@@ -9783,14 +9802,13 @@ my $lensCountPrint = '$val & 0x800000 ? "Not supported" : $val';
         Name => 'LensDriveCount3',
         Condition => "$lensSerial and $lensLayout2",
         Notes => q{
-            Only for the RF 28-70mm F2.8 IS STM, RF 16-28mm F2.8 IS STM, RF-S 14-30mm
-            F4-6.3 IS STM PZ, RF 20-50mm F4 L IS USM PZ, RF 45mm F1.2 STM and RF
-            7-14mm F2.8-3.5 L FISHEYE STM.  A lifetime counter that increases by about
-            3-4 per power-on and does not follow the number of shots.
-            What it counts is unconfirmed
+            Only for the lenses with the second LensInfo layout, where offsets 7-8 are
+            zero (eg. RF 28-70mm F2.8 IS STM and RF 45mm F1.2 STM).  A lifetime counter
+            that increases by about 3-4 per power-on and does not follow the number of
+            shots.  What it counts is unconfirmed
         },
         Format => 'undef[3]',
-        RawConv => '$val eq "\0\0\0" ? undef : $val',
+        RawConv => $lensCountRaw,
         ValueConv => 'unpack("N","\0$val")',
         PrintConv => $lensCountPrint,
     },
