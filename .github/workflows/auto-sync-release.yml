@@ -1,0 +1,187 @@
+name: ExifTool - Sync official upstream and release
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Build and publish the current upstream revision again'
+        type: boolean
+        required: false
+        default: false
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/auto-sync-release.yml'
+      - '.github/scripts/sync-upstream.sh'
+      - '.github/scripts/package-portable.py'
+      - '.github/docs/BUILD.md'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: exiftool-upstream-sync-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Check and mirror exiftool/exiftool master
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.mirror.outputs.changed }}
+      source_sha: ${{ steps.mirror.outputs.source_sha }}
+      mirror_sha: ${{ steps.mirror.outputs.mirror_sha }}
+    steps:
+      - name: Check out local master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Compare and mirror the upstream commit
+        id: mirror
+        shell: bash
+        run: bash .github/scripts/sync-upstream.sh
+
+  build:
+    name: Verify and package ${{ matrix.platform }}
+    needs: sync
+    if: needs.sync.outputs.changed == 'true' || github.event_name == 'push' || inputs.force_build == true
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+          - platform: macos-perl
+            runner: macos-15
+          - platform: windows-x86_64
+            runner: windows-2022
+    env:
+      SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+    steps:
+      - name: Check out mirrored source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.mirror_sha }}
+
+      - name: Set up Python for reproducible packaging
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.40'
+
+      - name: Verify ExifTool command line and image metadata parsing
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl -c exiftool
+          perl exiftool -ver
+          test -f t/images/ExifTool.jpg
+          test "$(perl exiftool -s3 -FileType t/images/ExifTool.jpg | tr -d '\r')" = JPEG
+
+      - name: Build Perl package and run upstream tests
+        if: matrix.platform != 'windows-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          perl Makefile.PL
+          make -j2
+          make test
+
+      - name: Package platform portable distribution
+        shell: bash
+        run: python .github/scripts/package-portable.py --platform ${{ matrix.platform }} --source-sha "$SOURCE_SHA"
+
+      # ExifTool is written in Perl; the portable ZIP always works with an
+      # installed Perl. A self-contained Windows executable is best-effort
+      # because PAR::Packer and optional Win32 modules depend on the toolchain.
+      - name: Attempt self-contained Windows EXE with PAR::Packer
+        if: matrix.platform == 'windows-x86_64'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cpanm --notest PAR::Packer Archive::Zip
+          mkdir -p exe-build
+          pp -I lib -M Image::ExifTool -M Archive::Zip -o exe-build/exiftool.exe windows_exiftool
+          test -s exe-build/exiftool.exe
+          expected="$(perl exiftool -ver | tr -d '\r')"
+          actual="$(./exe-build/exiftool.exe -ver | tr -d '\r')"
+          test "$actual" = "$expected"
+          short="${SOURCE_SHA:0:12}"
+          version="$(python -c 'import json; print(json.load(open("META.json"))["version"])')"
+          cp exe-build/exiftool.exe "out/exiftool-${version}-${short}-windows-x86_64.exe"
+
+      - name: Upload validated package files
+        uses: actions/upload-artifact@v4
+        with:
+          name: exiftool-${{ matrix.platform }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  release:
+    name: Publish GitHub pre-release
+    needs: [sync, build]
+    if: needs.build.result == 'success' && (needs.sync.outputs.changed == 'true' || github.event_name == 'push' || inputs.force_build == true)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SOURCE_SHA: ${{ needs.sync.outputs.source_sha }}
+      MIRROR_SHA: ${{ needs.sync.outputs.mirror_sha }}
+    steps:
+      - name: Check out source for release metadata
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.sync.outputs.mirror_sha }}
+
+      - name: Collect all validated artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: exiftool-*
+          merge-multiple: true
+          path: release_files
+
+      - name: Create or update revisioned pre-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          count="$(find release_files -maxdepth 1 -type f $( -name '*.zip' -o -name '*.tar.gz' $) | wc -l)"
+          test "$count" -ge 3
+          version="$(python3 -c 'import json; print(json.load(open("META.json"))["version"])')"
+          short="${SOURCE_SHA:0:12}"
+          tag="exiftool-${version}-${short}"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Automated, unofficial builds of [Phil Harvey's ExifTool](https://github.com/exiftool/exiftool).
+
+          - ExifTool version: ${version}
+          - Official upstream commit: ${SOURCE_SHA}
+          - GitHub mirror commit: ${MIRROR_SHA}
+          - Linux and macOS distributions require Perl installed.
+          - Windows portable ZIP requires Perl; the optional Windows EXE is self-contained only if included among the assets.
+          - This is a source-tested mirror build, not an official ExifTool release.
+
+          The source tree is mirrored under master; original licensing is retained.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release_files/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" release_files/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$MIRROR_SHA" \
+              --prerelease \
+              --title "ExifTool ${version} (${short}) - automated" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
