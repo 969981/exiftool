@@ -158,7 +158,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          count="$(find release_files -maxdepth 1 -type f $( -name '*.zip' -o -name '*.tar.gz' $) | wc -l)"
+          count="$(find release_files -maxdepth 1 -type f | grep -Ec '(\.zip|\.tar\.gz)
+          test "$count" -ge 3
+          version="$(python3 -c 'import json; print(json.load(open("META.json"))["version"])')"
+          short="${SOURCE_SHA:0:12}"
+          tag="exiftool-${version}-${short}"
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Automated, unofficial builds of [Phil Harvey's ExifTool](https://github.com/exiftool/exiftool).
+
+          - ExifTool version: ${version}
+          - Official upstream commit: ${SOURCE_SHA}
+          - GitHub mirror commit: ${MIRROR_SHA}
+          - Linux and macOS distributions require Perl installed.
+          - Windows portable ZIP requires Perl; the optional Windows EXE is self-contained only if included among the assets.
+          - This is a source-tested mirror build, not an official ExifTool release.
+
+          The source tree is mirrored under master; original licensing is retained.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" release_files/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" release_files/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$MIRROR_SHA" \
+              --prerelease \
+              --title "ExifTool ${version} (${short}) - automated" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
+ || true)"
           test "$count" -ge 3
           version="$(python3 -c 'import json; print(json.load(open("META.json"))["version"])')"
           short="${SOURCE_SHA:0:12}"
