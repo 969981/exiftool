@@ -127,19 +127,24 @@ jobs:
       - name: Attempt self-contained Windows EXE with PAR::Packer
         if: matrix.platform == 'windows-x86_64'
         continue-on-error: true
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cpanm --notest PAR::Packer Archive::Zip
-          mkdir -p exe-build
+          $ErrorActionPreference = 'Stop'
+          $env:PATH = 'C:\Strawberry\perl\bin;C:\Strawberry\perl\site\bin;C:\Strawberry\c\bin;' + $env:PATH
+          perl -S cpanm --notest PAR::Packer Archive::Zip
+          if ($LASTEXITCODE -ne 0) { throw 'Installing PAR::Packer failed' }
+          New-Item -Path exe-build -ItemType Directory -Force | Out-Null
           pp -I lib -M Image::ExifTool -M Archive::Zip -o exe-build/exiftool.exe windows_exiftool
-          test -s exe-build/exiftool.exe
-          expected="$(perl exiftool -ver | tr -d '\r')"
-          actual="$(./exe-build/exiftool.exe -ver | tr -d '\r')"
-          test "$actual" = "$expected"
-          short="${SOURCE_SHA:0:12}"
-          version="$(python -c 'import json; print(json.load(open("META.json"))["version"])')"
-          cp exe-build/exiftool.exe "out/exiftool-${version}-${short}-windows-x86_64.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'PAR::Packer failed to generate an executable' }
+          if (-not (Test-Path exe-build/exiftool.exe)) { throw 'Missing exiftool.exe' }
+          $expected = (perl exiftool -ver).Trim()
+          $actual = (& ./exe-build/exiftool.exe -ver).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $expected) {
+            throw "Windows executable verification failed (expected $expected, got $actual)"
+          }
+          $version = (Get-Content META.json -Raw | ConvertFrom-Json).version
+          $short = $env:SOURCE_SHA.Substring(0, 12)
+          Copy-Item exe-build/exiftool.exe "out/exiftool-$version-$short-windows-x86_64.exe" -Force
 
       - name: Upload validated package files
         uses: actions/upload-artifact@v4
