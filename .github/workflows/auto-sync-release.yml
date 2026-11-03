@@ -74,10 +74,30 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Set up Perl
+      - name: Set up Perl (Linux and macOS)
+        if: matrix.platform != 'windows-x86_64'
         uses: shogo82148/actions-setup-perl@v1
         with:
           perl-version: '5.40'
+
+      - name: Set up full Strawberry Perl toolchain on Windows
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'C:\Strawberry\perl\bin\perl.exe')) {
+            choco install strawberryperl --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Strawberry Perl installation failed' }
+          }
+          'C:\Strawberry\perl\bin' >> $env:GITHUB_PATH
+          'C:\Strawberry\c\bin' >> $env:GITHUB_PATH
+          'C:\Strawberry\perl\site\bin' >> $env:GITHUB_PATH
+
+      - name: Verify Windows Perl build toolchain
+        if: matrix.platform == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          perl -MExtUtils::MakeMaker -e "print qq(MakeMaker available\n)"
+          if ($LASTEXITCODE -ne 0) { throw 'Full Strawberry Perl toolchain is not ready' }
 
       - name: Verify ExifTool command line and image metadata parsing
         shell: bash
